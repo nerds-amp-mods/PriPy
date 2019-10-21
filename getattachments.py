@@ -1,45 +1,63 @@
 import email
-import imaplib
+from aioimaplib import aioimaplib
 import os
 import json
-
-with open("credentials.json") as filename:
-    credentials = json.load(filename)
+import asyncio
 
 
-detach_dir = "./attachments" 
-user = credentials["email"]
-pwd = credentials["password"]
+@asyncio.coroutine
+def get_attachments(host, user, pwd):
+    detach_dir = "./attachments" 
+    client = aioimaplib.IMAP4_SSL(host=host)
 
-m = imaplib.IMAP4_SSL("imap.gmail.com")
-m.login(user, pwd)
-m.select("INBOX")
+    yield from client.wait_hello_from_server()
+    yield from client.login(user, pwd)
 
-resp, items = m.search(None, "ALL")
-items = items[0].split()  
+    yield from client.select("INBOX")
 
-for emailid in items:
-    resp, data = m.fetch(emailid, "(RFC822)")
-    email_body = data[0][1].decode('utf-8')  
-    mail = email.message_from_string(email_body)
+    yield from client.idle_start(timeout=10)
+    while client.has_pending_idle():
+        email_event = yield from client.wait_server_push()
+        if email_event != "stop_wait_server_push" and "EXISTS" in email_event[0]: 
+            emailId = email_event[0].split()[0]
+            client.idle_done()
 
-    if mail.get_content_maintype() != 'multipart':
-        continue
+            resp, data = yield from client.fetch(emailId, "(RFC822)")
+            mail = email.message_from_bytes(data[1])
 
-    print ("["+mail["From"]+"] :" + mail["Subject"])
+            yield from client.idle_start(timeout=10)
 
-    for part in mail.walk():
-        # multipart are just containers, so we skip them
-        if part.get_content_maintype() == 'multipart':
-            continue
+            if mail.get_content_maintype() != 'multipart':
+                continue
 
-        if part.get('Content-Disposition') is None:
-            continue
+            print ("["+mail["From"]+"] :" + mail["Subject"])
 
-        filename = part.get_filename()
-        att_path = os.path.join(detach_dir,filename)
+            for part in mail.walk():
+                # multipart are just containers, so we skip them
+                if part.get_content_maintype() == 'multipart':
+                    continue
 
-        if not os.path.isfile(att_path):
-            fp = open(att_path, 'wb')
-            fp.write(part.get_payload(decode=True))
-            fp.close()
+                if part.get('Content-Disposition') is None:
+                    continue
+
+                filename = part.get_filename()
+                if filename is not None:
+                    att_path = os.path.join(detach_dir,filename)
+
+                if not os.path.exists(detach_dir):
+                    os.mkdir(detach_dir)
+
+                if not os.path.isfile(att_path):
+                    fp = open(att_path, 'wb')
+                    fp.write(part.get_payload(decode=True))
+                    fp.close()
+
+if __name__=="__main__":
+    host="imap.gmail.com"
+    with open("credentials.json") as filename:
+        credentials = json.load(filename)
+        user = credentials["username"]
+        pwd = credentials["password"]
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(get_attachments(host, user, pwd))
